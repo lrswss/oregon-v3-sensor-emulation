@@ -1,12 +1,11 @@
 /*
  * 
- * THGN801 emulation for Arduino Uno with FS1000A 433 RF-transmitter
+ * WGR800 emulation for Arduino Uno with FS1000A 433 RF-transmitter
  * 
  * (c) 2021 Lars Wessels <software@bytebox.org>
  *
- * Sketch to replace a (broken) THGN801 433MHz sensor sending temperature
- * and humidity readings using the Oregon V3 protocol. Tested with WMR200 
- * base station and rtl_433.
+ * Sketch to replace a WGR800 433MHz anemometer sending its readings
+ * using the Oregon V3 protocol. Tested with WMR200 base station.
  * 
  * References:
  * http://wmrx00.sourceforge.net/Arduino/OregonScientific-RF-Protocols.pdf
@@ -17,23 +16,24 @@
  */
 
 #define RF433_TX_PIN 6  // output pin for 433MHz transmitter (e.g. FS1000A)
-#define V3_CHANNEL 1  // 1..10 for WMR200
-#define V3_PAYLOAD_NIBBLES 15 // excluding preamble, sync and trailing checksums
-#define V3_TX_INTERVAL_SECS 53
-#define V3_TX_BYTES 13
+#define V3_CHANNEL 0
+#define V3_PAYLOAD_NIBBLES 17
+#define V3_TX_INTERVAL_SECS 14
+#define V3_TX_BYTES 14
 
 #define V3_PULSE_LENGHT_US 488  // data rate 1024Hz
-#define V3_PULSE_SHORTEN_US 134 // 138us not working reliably
+#define V3_PULSE_SHORTEN_US 134  // 138us not working reliably
 #define V3_PULSE_TUNING 1.1  // increase up to 1.4 if base station doesn't pick up messages
 
 #define DEBUG_PAYLOAD
 #define DEBUG_LASTTX
 #define DEBUG_INC
 
-// set THGN801's values for temperature (degrees Celcius) and humidity 
-// which are  increased after each transmission if DEBUG_INC is set
-static float t_temp = -1.5;
-static uint8_t t_hum = 20;
+// set WGR800 wind speed readings (max. 99.9 m/s) and direction which are
+// increased after each transmission for testing purposes if DEBUG_INC is set 
+static float t_avg = 1.3;
+static float t_gust = 2.6;
+static float t_dir = 45;
 
 // rolling code changes on every sensor reset
 static uint8_t rcode;
@@ -58,7 +58,7 @@ uint8_t crc8_checksum_v3(uint8_t *payload, uint8_t payloadNibbles) {
                 crc <<= 1;
         }
     }
-    
+
     // nibbles need to be swapped (LSD)
     return ((crc & 0x0F) << 4) | ((crc & 0xF0) >> 4);
 }
@@ -73,26 +73,26 @@ uint8_t oregon_checksum_v3(uint8_t *payload, int payloadNibbles) {
     checksum = (payload[3] & 0xF);
 
     // nibbles used for simple checksum (sum of nibbles)
-    // 4 (sensor id) + 1 (V3_CHANNEL) + 2 (rolling code) + 1 (flag) + payloadNibbles
+    // 4 (sensor id) + 1 (channel) + 2 (rolling code) + 1 (flag) + payloadNibbles
     for (uint8_t i = 4; i < ((28 + payloadNibbles*4) / 8); i++)
         checksum += (payload[i] >> 4) + (payload[i] & 0xF);
-
+    
     if ((payloadNibbles % 2) == 0)
         checksum += payload[((28 + payloadNibbles*4)/8)] >> 4;
-
+    
     return ((checksum & 0x0F) << 4) | ((checksum & 0xF0) >> 4);
 }
 
 
 // send a single byte as series of manchester encoded RF pulses
-// if base station won't receive packets timing is probably off
+// base station won't receive packets if timing is off
 // adjusting V3_PULSE_TUNING from 1.1 up to 1.4 should help
 void manchester_encode_v3(uint8_t txByte) {
     static uint32_t txMicros = micros();
     uint8_t bitMask = 0; 
 
     // send 8 bits of data 
-    for (uint8_t i = 0; i < 8; i++) {  
+    for (uint8_t i = 0; i < 8; i++) {
 
         // ensure equal distant bit pulses
         txMicros += (V3_PULSE_LENGHT_US * 2);
@@ -117,10 +117,10 @@ void manchester_encode_v3(uint8_t txByte) {
 }  
 
 
-// returns payload for THGN801 outdoor sensor (13 bytes)
-uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
+// returns payload for WGR800 anemometer (14 bytes)
+uint8_t *payload_wgr800(uint8_t rollingCode, float windAvg, float windGust, float windDir) {
     static uint8_t payload[V3_TX_BYTES];
-    uint16_t t10;
+    uint16_t wdir, wgust, wavg;
 
     // 6 nibbles preamble
     // 1 nibble sync
@@ -128,21 +128,21 @@ uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
     // 1 nibble channel
     // 2 nibbles rolling code
     // 1 nibble flag (battery)
-    // n nibbles sensor specific payload (THGN801 n=7, 28 bits)
+    // n nibbles sensor specific payload (WGR800 n=9, 36 bits)
     // 2 nibbles oregon checksum
     // 2 nibbles crc8 checksum
     memset(payload, 0, V3_TX_BYTES);
   
     // preamble with 1-bit pulses (6 nibbles) and 1 sync nibble '0101' (28 bits)
-    memset(payload, 0xFF, 3);  
-    payload[3] = 0xA0;
+    memset(payload, 0xFF, 3); // 1..6
+    payload[3] = 0xA0; // 7
   
     // nibbles 8..11: oregon sensor id (16 bits)
-    payload[3] |= 0x0F; // THGN801 is 0xF824
-    payload[4] = 0x82;
+    payload[3] |= 0x01; // WGR800 is 0x1984
+    payload[4] = 0x98;
     payload[5] = 0x40;
   
-    // nibble 12: channel 1..10 for THGN801 using a WMR200 base station (4 bits)
+    // nibble 12: seems to be channel 0 for WGR800 (4 bits)
     payload[5] |= V3_CHANNEL > 15 ? 15 : V3_CHANNEL;
   
     // nibble 13..14 is rolling code, changes on sensor reset (16 bits LSD) 
@@ -151,24 +151,23 @@ uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
     // nibble 15 is flag for battery status (4 bits)
     payload[7] = 0x00; // set to 0x40 for low battery
 
-    // nibbles 16..22 encode THGN801 specific data (24 bits)
-    // 16..19 temperature in degC as LSD with 0.1 precision
-    t10 = abs(tempC * 10.001);  // .001 required to fix rounding issues
-    payload[7] |= ((t10 % 10) & 0x0F);
-    payload[8] = ((t10 / 10) % 10) << 4 | ((t10 / 100) & 0x0F);
-    payload[9] = (tempC < 0.0) ? 0x80 : 0; // nibble 19 encodes temperature sign (0x80 => neg.)    
+    // nibbles 16..24 encodes anemometer specific data (36 bits)
+    wdir = windDir * 10.001;
+    wgust = windGust * 10.001;
+    wavg = windAvg * 10.001;  
+    payload[7] |= (wdir / 225) & 0x0F;
+    payload[8] = 0x0C; // nibble 17..18 not documented but required...
+    payload[9] = (wgust % 10) << 4 | ((wgust / 10) % 10);
+    payload[10] = ((wgust / 100) % 10) << 4 | (wavg % 10);
+    payload[11] = ((wavg / 10) % 10) << 4 | ((wavg / 100) % 10);
 
-    // 20..21 encodes relative humidity
-    payload[9] |= (hum % 10) & 0x0F; // 0-100%
-    payload[10] = ((hum / 10) % 10) << 4;  // use of nibble 22 unknown
-
-    // checksum (8 bits) for nibbles 16..21 with sensor specific data (sum of nibbles)
-    payload[11] = oregon_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
+    // checksum (8 bits) for nibbles 16..24 with sensor specific data (sum of nibbles)
+    payload[12] = oregon_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
 
     // crc8 checksum for V3 protocol (8 bits)
-    payload[12] = crc8_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
+    payload[13] = crc8_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
 
-    return payload;  
+    return payload;
 }
 
 
@@ -205,7 +204,7 @@ void setup() {
 
     Serial.begin(115200);
     delay(250);   
-    Serial.print(F("\n\nStarting Oregon V3 THGN801 emulator...\n\n"));
+    Serial.print(F("\n\nStarting Oregon V3 WGR800 emulator...\n\n"));
     
     randomSeed(analogRead(1)); // random seed for rolling code
     rcode = random(0x01, 0xFE);
@@ -215,7 +214,7 @@ void setup() {
     Serial.print(", Channel: ");
     Serial.print(V3_CHANNEL);
     Serial.print(", RF433 packets: ");
-    Serial.println(V3_TX_BYTES);
+    Serial.println(V3_TX_BYTES);    
 }
 
 
@@ -240,11 +239,14 @@ void loop() {
         digitalWrite(LED_BUILTIN, HIGH);
 
         Serial.print(millis());
-        Serial.print(": THGN801 (Temperature: ");
-        Serial.print(t_temp);
-        Serial.print(" °C, Humidity: ");
-        Serial.print(t_hum);
-        Serial.print(" %");
+        Serial.print(": WGR800");
+        Serial.print(" (Gust: ");
+        Serial.print(t_gust);
+        Serial.print(" m/s, Average: ");
+        Serial.print(t_avg);
+        Serial.print(" m/s, Direction: ");
+        Serial.print(t_dir);
+        Serial.print("°");
 #ifdef DEBUG_LASTTX
         if (lastTX > 0) {
             Serial.print(", Last TX ");
@@ -256,16 +258,19 @@ void loop() {
         Serial.println(")");
 
         // create and send off sensor payload
-        send_data_v3(payload_thgn801(rcode, t_temp, t_hum), V3_TX_BYTES);
+        send_data_v3(payload_wgr800(rcode, t_avg, t_gust, t_dir), V3_TX_BYTES); 
 
 #ifdef DEBUG_INC
         // increase readings for testing
-        t_temp += 0.1;
-        if (t_temp  > 45)
-            t_temp = 19.0;
-        t_hum += 1;
-        if (t_hum > 95)
-            t_hum = 30;
+        t_gust += 0.2;
+        if (t_gust  > 20)
+            t_gust = 5.0;
+        t_avg += 0.1;
+        if (t_avg  > 15)
+            t_avg = 0.1;
+        t_dir += 22.5;
+        if (t_dir > 359)
+            t_dir = 0;
 #endif
     }
 }

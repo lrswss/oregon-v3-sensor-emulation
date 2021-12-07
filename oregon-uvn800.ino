@@ -1,12 +1,11 @@
 /*
  * 
- * THGN801 emulation for Arduino Uno with FS1000A 433 RF-transmitter
+ * UVN800 emulation for Arduino Uno with FS1000A 433 RF-transmitter
  * 
  * (c) 2021 Lars Wessels <software@bytebox.org>
  *
- * Sketch to replace a (broken) THGN801 433MHz sensor sending temperature
- * and humidity readings using the Oregon V3 protocol. Tested with WMR200 
- * base station and rtl_433.
+ * Sketch to replace a UVN800 433MHz sensor sending uv index readings using
+ * the Oregon V3 protocol. Tested with WMR200 base station and rtl_433.
  * 
  * References:
  * http://wmrx00.sourceforge.net/Arduino/OregonScientific-RF-Protocols.pdf
@@ -17,23 +16,22 @@
  */
 
 #define RF433_TX_PIN 6  // output pin for 433MHz transmitter (e.g. FS1000A)
-#define V3_CHANNEL 1  // 1..10 for WMR200
-#define V3_PAYLOAD_NIBBLES 15 // excluding preamble, sync and trailing checksums
-#define V3_TX_INTERVAL_SECS 53
-#define V3_TX_BYTES 13
+#define V3_CHANNEL 1
+#define V3_PAYLOAD_NIBBLES 13
+#define V3_TX_INTERVAL_SECS 73
+#define V3_TX_BYTES 12
 
 #define V3_PULSE_LENGHT_US 488  // data rate 1024Hz
-#define V3_PULSE_SHORTEN_US 134 // 138us not working reliably
+#define V3_PULSE_SHORTEN_US 134  // 138us not working reliably
 #define V3_PULSE_TUNING 1.1  // increase up to 1.4 if base station doesn't pick up messages
 
 #define DEBUG_PAYLOAD
 #define DEBUG_LASTTX
 #define DEBUG_INC
 
-// set THGN801's values for temperature (degrees Celcius) and humidity 
-// which are  increased after each transmission if DEBUG_INC is set
-static float t_temp = -1.5;
-static uint8_t t_hum = 20;
+// set UVN800's reading for UVI which is increased after each 
+// transmission for testing purposes if DEBUG_INC is set
+static uint8_t t_uvi = 1;
 
 // rolling code changes on every sensor reset
 static uint8_t rcode;
@@ -92,7 +90,7 @@ void manchester_encode_v3(uint8_t txByte) {
     uint8_t bitMask = 0; 
 
     // send 8 bits of data 
-    for (uint8_t i = 0; i < 8; i++) {  
+    for (uint8_t i = 0; i < 8; i++) {
 
         // ensure equal distant bit pulses
         txMicros += (V3_PULSE_LENGHT_US * 2);
@@ -117,10 +115,9 @@ void manchester_encode_v3(uint8_t txByte) {
 }  
 
 
-// returns payload for THGN801 outdoor sensor (13 bytes)
-uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
+// returns payload for UVN800 outdoor UVI sensor (12 bytes)
+uint8_t *payload_uvn800(uint8_t rollingCode, uint8_t uvi) {
     static uint8_t payload[V3_TX_BYTES];
-    uint16_t t10;
 
     // 6 nibbles preamble
     // 1 nibble sync
@@ -128,7 +125,7 @@ uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
     // 1 nibble channel
     // 2 nibbles rolling code
     // 1 nibble flag (battery)
-    // n nibbles sensor specific payload (THGN801 n=7, 28 bits)
+    // n nibbles sensor specific payload (UVN800 n=5, 20 bits)
     // 2 nibbles oregon checksum
     // 2 nibbles crc8 checksum
     memset(payload, 0, V3_TX_BYTES);
@@ -138,11 +135,11 @@ uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
     payload[3] = 0xA0;
   
     // nibbles 8..11: oregon sensor id (16 bits)
-    payload[3] |= 0x0F; // THGN801 is 0xF824
-    payload[4] = 0x82;
+    payload[3] |= 0x0D; // UVN800 is 0xD874
+    payload[4] = 0x87;
     payload[5] = 0x40;
   
-    // nibble 12: channel 1..10 for THGN801 using a WMR200 base station (4 bits)
+    // nibble 12: channel 1 seems to be preset for UVN800 (4 bits)
     payload[5] |= V3_CHANNEL > 15 ? 15 : V3_CHANNEL;
   
     // nibble 13..14 is rolling code, changes on sensor reset (16 bits LSD) 
@@ -151,24 +148,17 @@ uint8_t *payload_thgn801(uint8_t rollingCode, float tempC, uint8_t hum) {
     // nibble 15 is flag for battery status (4 bits)
     payload[7] = 0x00; // set to 0x40 for low battery
 
-    // nibbles 16..22 encode THGN801 specific data (24 bits)
-    // 16..19 temperature in degC as LSD with 0.1 precision
-    t10 = abs(tempC * 10.001);  // .001 required to fix rounding issues
-    payload[7] |= ((t10 % 10) & 0x0F);
-    payload[8] = ((t10 / 10) % 10) << 4 | ((t10 / 100) & 0x0F);
-    payload[9] = (tempC < 0.0) ? 0x80 : 0; // nibble 19 encodes temperature sign (0x80 => neg.)    
-
-    // 20..21 encodes relative humidity
-    payload[9] |= (hum % 10) & 0x0F; // 0-100%
-    payload[10] = ((hum / 10) % 10) << 4;  // use of nibble 22 unknown
-
-    // checksum (8 bits) for nibbles 16..21 with sensor specific data (sum of nibbles)
-    payload[11] = oregon_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
+    // nibbles 16..20 encode UVN800 specific sensor readings (20 bits)
+    payload[7] |= (uvi & 0x0F);  // UVI (max. 15)
+    // use of byte 8 and 9 unknown, my UVN800 sets byte 9 to 0x70...
+    
+    // checksum (8 bits) for nibbles 16..20 with sensor specific data (sum of nibbles)
+    payload[10] = oregon_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
 
     // crc8 checksum for V3 protocol (8 bits)
-    payload[12] = crc8_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
+    payload[11] = crc8_checksum_v3(payload, V3_PAYLOAD_NIBBLES);
 
-    return payload;  
+    return payload;
 }
 
 
@@ -205,8 +195,8 @@ void setup() {
 
     Serial.begin(115200);
     delay(250);   
-    Serial.print(F("\n\nStarting Oregon V3 THGN801 emulator...\n\n"));
-    
+    Serial.print(F("\n\nStarting Oregon V3 UVN800 emulator...\n\n"));
+
     randomSeed(analogRead(1)); // random seed for rolling code
     rcode = random(0x01, 0xFE);
     Serial.print(millis());
@@ -223,7 +213,7 @@ void loop() {
     static uint32_t seconds = 0;
     static uint32_t lastMillis = 0, lastTX = 0;
     static bool tx_pending = true;
-    
+
     if (millis() - lastMillis > 1000) {
         digitalWrite(LED_BUILTIN, LOW);
         lastMillis = millis();
@@ -240,11 +230,8 @@ void loop() {
         digitalWrite(LED_BUILTIN, HIGH);
 
         Serial.print(millis());
-        Serial.print(": THGN801 (Temperature: ");
-        Serial.print(t_temp);
-        Serial.print(" °C, Humidity: ");
-        Serial.print(t_hum);
-        Serial.print(" %");
+        Serial.print(": UVN800 (UV Index: ");
+        Serial.print(t_uvi);
 #ifdef DEBUG_LASTTX
         if (lastTX > 0) {
             Serial.print(", Last TX ");
@@ -256,16 +243,13 @@ void loop() {
         Serial.println(")");
 
         // create and send off sensor payload
-        send_data_v3(payload_thgn801(rcode, t_temp, t_hum), V3_TX_BYTES);
+        send_data_v3(payload_uvn800(rcode, t_uvi), V3_TX_BYTES); 
 
 #ifdef DEBUG_INC
         // increase readings for testing
-        t_temp += 0.1;
-        if (t_temp  > 45)
-            t_temp = 19.0;
-        t_hum += 1;
-        if (t_hum > 95)
-            t_hum = 30;
+        t_uvi += 1;
+        if (t_uvi > 3)
+            t_uvi = 1;
 #endif
     }
 }
